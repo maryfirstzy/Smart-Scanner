@@ -79,7 +79,7 @@ def parse_der_signature(sig_hex):
         if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
             return None
         
-        r_length = sig_bytes[3]
+        r_length = sig_bytes[1]
         r_start = 4
         r_bytes = sig_bytes[r_start:r_start + r_length]
         
@@ -245,4 +245,5 @@ if __name__ == "__main__":
             with open(source_filename, "r", encoding="utf-8") as entry_file:
                 for line in entry_file:
                     clean_addr = line.strip().replace(",", "")
-                    if clean_addr and not clean_addr.startswith("#"):
+                    if not clean_addr:
+                        continue
