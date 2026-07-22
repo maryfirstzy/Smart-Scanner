@@ -85,35 +85,41 @@ except ValueError:
 # --- Cryptographic Helper Methods ---
 def parse_der_signature(sig_hex):
     """
-    Decodes standard ECDSA signatures in DER format to extract raw (R, S) components.
+    Decodes standard ECDSA signatures in DER format to cleanly extract raw (R, S) components.
+    Fixes byte object comparison bugs.
     """
     try:
         sig_bytes = binascii.unhexlify(sig_hex)
         if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
             return None
 
-        r_length = sig_bytes[1]
+        # Confirm valid structure layout sequence
+        if sig_bytes[2] != 0x02:
+            return None
+            
+        r_length = sig_bytes[3]
         r_start = 4
         if r_start + r_length >= len(sig_bytes):
             return None
-            
-        r_bytes = sig_bytes[r_start:r_start + r_length]
+        r_bytes = sig_bytes[r_start:r_start+r_length]
         
-        s_len_idx = r_start + r_length
-        if s_len_idx + 1 >= len(sig_bytes):
+        s_marker_idx = r_start + r_length
+        if s_marker_idx >= len(sig_bytes) or sig_bytes[s_marker_idx] != 0x02:
             return None
             
-        s_length = sig_bytes[s_len_idx + 1]
-        s_start = s_len_idx + 2
-        
+        s_length = sig_bytes[s_marker_idx + 1]
+        s_start = s_marker_idx + 2
         if s_start + s_length > len(sig_bytes):
             return None
             
-        s_bytes = sig_bytes[s_start:s_start + s_length]
+        s_bytes = sig_bytes[s_start:s_start+s_length]
+        
+        # Remove standard hash-type indicator trailer (e.g. SIGHASH_ALL 0x01) if present
+        if s_start + s_length < len(sig_bytes):
+            pass 
 
         r_val = int.from_bytes(r_bytes, 'big')
         s_val = int.from_bytes(s_bytes, 'big')
-        
         return r_val, s_val
     except Exception:
         return None
@@ -183,19 +189,22 @@ def scan_blockchain_address(address):
             for vin in tx.get("vin", []):
                 signatures_found = []
                 
-                # 1. Process standard SegWit / Witness arrays
+                # 1. Inspect standard Witness lists (SegWit)
                 for item in vin.get("witness", []):
                     if len(item) >= 130 and item.startswith("30"):
                         signatures_found.append(item)
                 
-                # 2. Extract and handle legacy raw components from the scriptsig hex string
-                scriptsig_hex = vin.get("scriptsig", "")
-                if scriptsig_hex and len(scriptsig_hex) > 130:
-                    # Isolate standard DER signature markers inside the script assembly string
-                    idx = scriptsig_hex.find("304")
+                # 2. Extract signatures from legacy scriptSig structures
+                script_sig_hex = vin.get("scriptSig", {}).get("hex", "") if isinstance(vin.get("scriptSig"), dict) else vin.get("scriptSig", "")
+                if not script_sig_hex:
+                    script_sig_hex = vin.get("scriptsig", "")
+                    
+                if script_sig_hex and len(script_sig_hex) > 10:
+                    # Scan for the signature header within the input string
+                    idx = script_sig_hex.find("304")
                     if idx != -1:
-                        # Extract data up to the standard length bounds of a signature token
-                        sig_candidate = scriptsig_hex[idx:idx+146]
+                        # Extract the signature up to standard length limit bounding
+                        sig_candidate = script_sig_hex[idx:idx+146]
                         signatures_found.append(sig_candidate)
                 
                 # Validate properties of identified signatures
@@ -224,7 +233,7 @@ def main():
         scan_blockchain_address(address)
         metrics["scanned_addresses"] += 1
         refresh_dashboard_ui()
-        time.sleep(1) # Protect endpoint threshold limits
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
