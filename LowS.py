@@ -32,19 +32,16 @@ class UIColors:
     BRIGHT_WHITE = '\033[97m'
 
 # --- API Layer Configuration ---
-API_PROVIDER_PRIORITY = "mempool"
 API_REGISTRY = {
     "mempool": {
         "base_url": "https://mempool.space",
-        "tx_endpoint": "/api/address/{address}/txs",
-        "extract_count": lambda data: len(data) if isinstance(data, list) else 0
+        "tx_endpoint": "/address/{address}/txs"
     }
 }
 
 # --- Operational Global Variables ---
 SECP256K1_ORDER = SECP256k1.order
-HALF_SECP256K1_ORDER = SECP256K1_ORDER // 2  # Definition boundary for Low-S compliance mapping
-BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+HALF_SECP256K1_ORDER = SECP256K1_ORDER // 2
 
 metrics = {
     "total_addresses": 0,
@@ -58,14 +55,8 @@ app_should_exit = False
 
 # --- Input Pipeline Initialization ---
 def initialize_address_pool():
-    """
-    Initializes address lists from an Addresses.txt file. 
-    Injects default target if the pool file does not exist.
-    """
     filename = "Addresses.txt"
     addresses = []
-    
-    # Auto-generate file with sample target if absent
     if not os.path.exists(filename):
         with open(filename, "w") as f:
             f.write("1dice8EMZmqKvrGE4Qc9bUFf9PX3xaYDp\n")
@@ -82,7 +73,7 @@ def initialize_address_pool():
 # --- System Signal Handlers ---
 def handle_shutdown_signal(signum, frame):
     global app_should_exit
-    print(f"\n{UIColors.YELLOW}[!] Break signal caught. Stopping scanner loop safely...{UIColors.RESET}")
+    print(f"\n{UIColors.YELLOW}[!] Break signal caught. Stopping loop...{UIColors.RESET}")
     app_should_exit = True
 
 try:
@@ -166,7 +157,7 @@ def refresh_dashboard_ui():
     render_row("MEDIUM", UIColors.ORANGE, "LLL Lattice Attack Bias", metrics['vulnerability_counts']['LLL Bias'])
     render_row("", "", "Low Order Point Flags", metrics['vulnerability_counts']['Low Order'])
     render_row("INFO", UIColors.GREEN, "Signature Low 'S' Compliant", metrics['vulnerability_counts']['Low S Signature'])
-    render_row("", UIColors.GREEN, "Signature 'Z' (Hash Message)", metrics['vulnerability_counts']['Signature Z'])
+    render_row("", UIColors.GREEN, "Signature High 'S' Value", metrics['vulnerability_counts']['High S Signature'])
     render_row("LOW", UIColors.YELLOW, "Nonce Bias (Leading Zeros)", metrics['vulnerability_counts']['Leading Zeros'])
     render_row("INFO", UIColors.GREEN, "Non-Canonical Scripts", metrics['vulnerability_counts']['Non-Canonical'])
     print(f"{table_border}╚{'═'*14}╩{'═'*38}╩{'═'*10}╝{UIColors.RESET}")
@@ -190,29 +181,34 @@ def scan_blockchain_address(address):
 
         for tx in txs:
             for vin in tx.get("vin", []):
-                # Analyze witness elements or scriptSig details
-                scriptsig_hex = vin.get("scriptsig", "")
-                witness_list = vin.get("witness", [])
-                
                 signatures_found = []
                 
-                # Check witness structures (SegWit)
-                for item in witness_list:
+                # 1. Process standard SegWit / Witness arrays
+                for item in vin.get("witness", []):
                     if len(item) >= 130 and item.startswith("30"):
                         signatures_found.append(item)
                 
-                # Fallback to Legacy ScriptSig strings
-                if scriptsig_hex and scriptsig_hex.startswith("4"):
-                    signatures_found.append(scriptsig_hex)
+                # 2. Extract and handle legacy raw components from the scriptsig hex string
+                scriptsig_hex = vin.get("scriptsig", "")
+                if scriptsig_hex and len(scriptsig_hex) > 130:
+                    # Isolate standard DER signature markers inside the script assembly string
+                    idx = scriptsig_hex.find("304")
+                    if idx != -1:
+                        # Extract data up to the standard length bounds of a signature token
+                        sig_candidate = scriptsig_hex[idx:idx+146]
+                        signatures_found.append(sig_candidate)
                 
+                # Validate properties of identified signatures
                 for sig in signatures_found:
                     components = parse_der_signature(sig)
                     if components:
-                        r_val, s_val = components
+                        _, s_val = components
                         
-                        # Evaluate Low S signature conformity (BIP62 status monitoring)
+                        # Evaluate Low S signature conformity (BIP62 limits status monitoring)
                         if s_val <= HALF_SECP256K1_ORDER:
                             metrics['vulnerability_counts']['Low S Signature'] += 1
+                        else:
+                            metrics['vulnerability_counts']['High S Signature'] += 1
                             
     except Exception:
         pass
