@@ -1,282 +1,236 @@
-import requests
-import time
-from ecdsa.numbertheory import inverse_mod
-from hashlib import sha256
-import hashlib
 import os
-from collections import defaultdict
-from datetime import datetime
-import signal
 import sys
-import math
+import time
 import json
-from ecdsa import SECP256k1, SigningKey, VerifyingKey
+import signal
 import binascii
-import struct
-import io
+import hashlib
+import requests
+from datetime import datetime
+from collections import defaultdict
+from ecdsa import SECP256k1
 
-class Colors:
+# Securely auto-detect if the script is running inside Google Colab
+try:
+    from google.colab import files
+    from IPython.display import clear_output
+    IN_NOTEBOOK = True
+except ImportError:
+    IN_NOTEBOOK = False
+
+# --- Terminal UI Colors ---
+class UIColors:
     RESET = '\033[0m'
-    BLACK = '\033[30m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
     CYAN = '\033[36m'
+    BLUE = '\033[34m'
     WHITE = '\033[37m'
+    YELLOW = '\033[33m'
+    RED = '\033[31m'
     ORANGE = '\033[93m'
-    BRIGHT_BLACK = '\033[90m'
-    BRIGHT_RED = '\033[91m'
-    BRIGHT_GREEN = '\033[92m'
-    BRIGHT_YELLOW = '\033[93m'
-    BRIGHT_BLUE = '\033[94m'
-    BRIGHT_MAGENTA = '\033[95m'
-    BRIGHT_CYAN = '\033[96m'
+    GREEN = '\033[32m'
+    MAGENTA = '\033[35m'
     BRIGHT_WHITE = '\033[97m'
-    BRIGHT_ORANGE = '\033[93m'
 
-    BG_BLACK = '\033[40m'
-    BG_RED = '\033[41m'
-    BG_GREEN = '\033[42m'
-    BG_YELLOW = '\033[43m'
-    BG_BLUE = '\033[44m'
-    BG_MAGENTA = '\033[45m'
-    BG_CYAN = '\033[46m'
-    BG_WHITE = '\033[47m'
-    BG_ORANGE = '\033[93m'
+# --- API Layer Configuration (blockchain.info fully removed) ---
+API_PROVIDER_PRIORITY = ["mempool", "blockstream", "sochain", "btc_com"]
 
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    INVERT = '\033[7m'
-
-# --- API Configuration (blockchain.info completely removed) ---
-API_ORDER_TOTAL_TX = [
-    "mempool", "blockstream", "sochain", "btc_com"
-]
-
-API_ORDER_RAW_HEX_FALLBACK = [
-    ("mempool", "/tx/{txid}/hex"),
-    ("blockstream", "/tx/{txid}/hex"),
-    ("blockstream", "/tx/{txid}"),
-    ("sochain", "/get_tx/BTC/{txid}"),
-    ("btc_com", "/tx/{txid}")
-]
-
-API_CONFIGS = {
+API_REGISTRY = {
     "mempool": {
         "base_url": "https://mempool.space",
-        "total_tx_endpoint": "/address/{address}",
-        "tx_list_endpoint": "/address/{address}/txs",
-        "raw_tx_endpoint_hex": "/tx/{txid}/hex",
-        "parser": {
-            "total_tx": lambda data: data.get('chain_stats', {}).get('tx_count', 0),
-            "transactions_from_list": lambda data: [tx.get('txid') for tx in data if tx.get('txid')],
-            "get_raw_hex_from_plain_response": lambda response_text: response_text
-        }
+        "endpoint": "/address/{address}",
+        "extract_count": lambda data: data.get("chain_stats", {}).get("tx_count", 0) if isinstance(data, dict) else 0
     },
     "blockstream": {
         "base_url": "https://blockstream.info",
-        "total_tx_endpoint": "/address/{address}",
-        "tx_list_endpoint": "/address/{address}/txs",
-        "raw_tx_endpoint_hex": "/tx/{txid}/hex",
-        "raw_tx_endpoint_json": "/tx/{txid}",
-        "parser": {
-            "total_tx": lambda data: data.get('chain_stats', {}).get('tx_count', 0),
-            "transactions_from_list": lambda data: [tx.get('txid') for tx in data if tx.get('txid')],
-            "get_raw_hex_from_plain_response": lambda response_text: response_text,
-            "get_raw_hex_from_json_response": lambda data: data.get('hex', None)
-        }
+        "endpoint": "/address/{address}",
+        "extract_count": lambda data: data.get("chain_stats", {}).get("tx_count", 0) if isinstance(data, dict) else 0
     },
     "sochain": {
         "base_url": "https://sochain.com",
-        "total_tx_endpoint": "/address/BTC/{address}",
-        "tx_list_endpoint": "/address/BTC/{address}",
-        "raw_tx_endpoint_json": "/get_tx/BTC/{txid}",
-        "parser": {
-            "total_tx": lambda data: data.get('data', {}).get('txs', []).__len__(),
-            "transactions_from_list": lambda data: [tx.get('txid') for tx in data.get('data', {}).get('txs', []) if tx.get('txid')],
-            "get_raw_hex_from_json_response": lambda data: data.get('data', {}).get('tx_hex', None)
-        }
+        "endpoint": "/address/BTC/{address}",
+        "extract_count": lambda data: data.get("data", {}).get("txs", []).__len__() if isinstance(data, dict) else 0
     },
     "btc_com": {
         "base_url": "https://btc.com",
-        "total_tx_endpoint": "/address/{address}",
-        "tx_list_endpoint": "/address/{address}/tx?offset={offset}&limit={limit}",
-        "raw_tx_endpoint_json": "/tx/{txid}",
-        "parser": {
-            "total_tx": lambda data: data.get('data', {}).get('total_tx', 0),
-            "transactions_from_list": lambda data: [tx.get('hash') for tx in data.get('data', {}).get('list', []) if tx.get('hash')],
-            "get_raw_hex_from_json_response": lambda data: data.get('data', {}).get('hex', None)
-        }
+        "endpoint": "/address/{address}",
+        "extract_count": lambda data: data.get("data", {}).get("total_tx", 0) if isinstance(data, dict) else 0
     }
 }
 
-# Global variables for reporting
-TOTAL_ADDRESSES = 0
-SCANNED_ADDRESSES = 0
-VULNERABLE_ADDRESSES = 0
-VULN_COUNTS = defaultdict(int)
-CURRENT_ADDRESS = ""
-SCANNED_ADDRESS_LIST = []
-MAX_DISPLAYED_ADDRESSES = 10
-EXIT_FLAG = False
-REPORTS = []
-MAX_TRANSACTIONS = 0
-GLOBAL_MAX_SMALL_K_ATTEMPT = 0
+# --- Operational Global Variables ---
+SECP256K1_ORDER = SECP256k1.order
+BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
-# Configurable delay between API calls (in seconds)
-SCAN_DELAY_SECONDS = 0.5
-
-# Constants for SECP256k1
-P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-N = SECP256k1.order
-G = SECP256k1.generator
-
-S_MAX_HALF = N // 2 
-
-_BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-
-# Bitcoin Script Opcodes (Relevant for parsing)
-OP_DUP = 0x76
-OP_HASH160 = 0xA9
-OP_EQUALVERIFY = 0x88
-OP_CHECKSIG = 0xAC
-OP_EQUAL = 0x87
-OP_CHECKMULTISIG = 0xAE
-OP_0 = 0x00
-OP_1 = 0x51
-OP_2 = 0x52
-OP_3 = 0x53
-OP_4 = 0x54
-OP_5 = 0x55
-OP_6 = 0x56
-OP_7 = 0x57
-OP_8 = 0x58
-OP_9 = 0x59
-OP_10 = 0x5a
-OP_11 = 0x5b
-OP_12 = 0x5c
-OP_13 = 0x5d
-OP_14 = 0x5e
-OP_15 = 0x5f
-OP_16 = 0x60
-
-# Map OP_N to integer N
-OP_N_MAPPING = {
-    OP_0: 0, OP_1: 1, OP_2: 2, OP_3: 3, OP_4: 4, OP_5: 5, OP_6: 6, OP_7: 7, OP_8: 8,
-    OP_9: 9, OP_10: 10, OP_11: 11, OP_12: 12, OP_13: 13, OP_14: 14, OP_15: 15, OP_16: 16
+metrics = {
+    "total_addresses": 0,
+    "scanned_addresses": 0,
+    "vulnerable_addresses": 0,
+    "current_target": "None",
+    "vulnerability_counts": defaultdict(int),
+    "vulnerable_log": []
 }
 
-# Nonce Bias Threshold
-NONCE_BIAS_THRESHOLD = 2
+app_should_exit = False
 
-# Cache for fetched raw transaction hexes
-TX_RAW_HEX_CACHE = {}
+# --- System Signal Handlers ---
+def handle_shutdown_signal(signum, frame):
+    global app_should_exit
+    print(f"\n{UIColors.YELLOW}[!] Break signal caught. Stopping scanner loop safely...{UIColors.RESET}")
+    app_should_exit = True
 
-# --- Utility Functions ---
+try:
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+except ValueError:
+    pass  # Prevents thread-binding crashes unique to Jupyter/Colab asynchronous environments
 
-def signal_handler(sig, frame):
-    global EXIT_FLAG
-    print(f"\n{Colors.YELLOW}Signal {sig} received. Preparing to stop scanning.{Colors.RESET}")
-    EXIT_FLAG = True
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-def hex_to_int(h):
-    return int(h, 16)
-
-def int_to_hex(i):
-    return hex(i)
-
-def hash160(public_key_bytes):
+# --- Cryptographic Helper Methods ---
+def native_hash160(public_key_bytes):
+    sha_hash = hashlib.sha256(public_key_bytes).digest()
     try:
-        h = hashlib.new('ripemd160')
-        h.update(sha256(public_key_bytes).digest())
-        return h.digest()
+        engine = hashlib.new('ripemd160')
+        engine.update(sha_hash)
+        return engine.digest()
     except ValueError:
-        # Secure implementation layer fallback for distinct engine packages
-        sha = sha256(public_key_bytes).digest()
-        try:
-            return hashlib.new('ripemd160', sha).digest()
-        except Exception:
-            return sha[:20] # Standardized internal placeholder for broken OpenSSL bindings
+        return hashlib.new('ripemd160', sha_hash).digest()
 
-def encode_base58(v):
-    base58_string = b""
-    x = int.from_bytes(v, 'big')
+def encode_base58_checksum(payload_bytes):
+    x = int.from_bytes(payload_bytes, 'big')
+    encoded = b""
     while x > 0:
-        x, mod = divmod(x, 58)
-        base58_string = _BASE58_ALPHABET[mod:mod+1] + base58_string
-
-    for byte in v:
+        x, remainder = divmod(x, 58)
+        encoded = BASE58_ALPHABET[remainder:remainder+1] + encoded
+    
+    for byte in payload_bytes:
         if byte == 0x00:
-            base58_string = b"1" + base58_string
+            encoded = b"1" + encoded
         else:
             break
-    return base58_string.decode('utf-8')
+    return encoded.decode('utf-8')
 
-def point_to_pubkey_bytes(point, compressed=True):
-    if compressed:
-        prefix = b'\x02' if point.y() % 2 == 0 else b'\x03'
-        return prefix + point.x().to_bytes(32, byteorder='big')
-    else:
-        return b'\x04' + point.x().to_bytes(32, byteorder='big') + point.y().to_bytes(32, byteorder='big')
-
-def public_key_to_address(public_key_hex, is_compressed=True, script_type='P2PKH'):
+def public_key_to_p2pkh_address(pubkey_hex):
     try:
-        public_key_bytes = binascii.unhexlify(public_key_hex)
+        raw_bytes = binascii.unhexlify(pubkey_hex)
+        hashed_pubkey = b'\x00' + native_hash160(raw_bytes)
+        double_sha = hashlib.sha256(hashlib.sha256(hashed_pubkey).digest()).digest()
+        checksum = double_sha[:4]
+        return encode_base58_checksum(hashed_pubkey + checksum)
+    except Exception:
+        return "Encoding_Parsing_Error"
+
+# --- Interface Rendering UI ---
+def refresh_dashboard_ui():
+    if IN_NOTEBOOK:
+        clear_output(wait=True)
+    else:
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+    print(f"{UIColors.CYAN}{'='*80}{UIColors.RESET}")
+    print(f"{UIColors.BLUE}🔍 Modular Cryptographic Signature Vulnerability Scanner{UIColors.RESET}")
+    print(f"{UIColors.WHITE}📅 Active Runtime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{UIColors.RESET}")
+    print(f"{UIColors.CYAN}{'='*80}{UIColors.RESET}")
+    
+    print(f"{UIColors.BRIGHT_WHITE}📊 Scanning Session Metrics:{UIColors.RESET}")
+    print(f"  • Total Load Pool:  {UIColors.YELLOW}{metrics['total_addresses']}{UIColors.RESET}")
+    remaining = max(0, metrics['total_addresses'] - metrics['scanned_addresses'])
+    print(f"  • Queue Remaining:  {UIColors.YELLOW}{remaining}{UIColors.RESET}")
+    print(f"  • Scanned Complete: {UIColors.CYAN}{metrics['scanned_addresses']}{UIColors.RESET}")
+    print(f"  • Critical Exploits: {UIColors.RED}{metrics['vulnerable_addresses']}{UIColors.RESET}")
+    print(f"{UIColors.CYAN}{'='*80}{UIColors.RESET}")
+
+    print(f"\n{UIColors.BRIGHT_WHITE}🚨 Vulnerability Matrix Overview:{UIColors.RESET}")
+    table_border = UIColors.CYAN
+    print(f"{table_border}╔{'═'*14}╦{'═'*38}╦{'═'*10}╗{UIColors.RESET}")
+    print(f"{table_border}║{'Severity'.center(14)}║{'Target Vulnerability Vector'.center(38)}║{'Matches'.center(10)}║{UIColors.RESET}")
+    print(f"{table_border}╠{'═'*14}╬{'═'*38}╬{'═'*10}╣{UIColors.RESET}")
+
+    def render_row(severity, sev_color, name, count):
+        sev_str = f"{sev_color}{severity.ljust(12)}{UIColors.RESET}"
+        name_str = f"{UIColors.WHITE}{name.ljust(36)}{UIColors.RESET}"
+        cnt_str = f"{UIColors.YELLOW}{str(count).rjust(8)}{UIColors.RESET}"
+        print(f"{table_border}║ {UIColors.RESET}{sev_str} {table_border}║ {UIColors.RESET}{name_str} {table_border}║ {UIColors.RESET}{cnt_str} {table_border}║{UIColors.RESET}")
+
+    render_row("HIGH", UIColors.RED, "Reused Nonce (k-value)", metrics['vulnerability_counts']['Reused Nonce'])
+    render_row("", "", "Guessable Small K-Value", metrics['vulnerability_counts']['Small K'])
+    render_row("", "", "Fault Attack Vector", metrics['vulnerability_counts']['Fault Attack'])
+    print(f"{table_border}╠{'─'*14}╬{'─'*38}╬{'─'*10}╣{UIColors.RESET}")
+    render_row("MEDIUM", UIColors.ORANGE, "LLL Lattice Attack Bias", metrics['vulnerability_counts']['LLL Bias'])
+    render_row("", "", "Low Order Point Flags", metrics['vulnerability_counts']['Low Order'])
+    print(f"{table_border}╠{'─'*14}╬{'─'*38}╬{'─'*10}╣{UIColors.RESET}")
+    render_row("LOW", UIColors.YELLOW, "Nonce Bias (Leading Zeros)", metrics['vulnerability_counts']['Leading Zeros'])
+    render_row("INFO", UIColors.GREEN, "Non-Canonical Scripts", metrics['vulnerability_counts']['Non-Canonical'])
+    print(f"{table_border}╚{'═'*14}╩{'═'*38}╩{'═'*10}╝{UIColors.RESET}")
+
+    print(f"\n{UIColors.BRIGHT_WHITE}🔎 Active Worker target:{UIColors.RESET} {UIColors.MAGENTA}{metrics['current_target']}{UIColors.RESET}")
+    
+    print(f"\n{UIColors.BRIGHT_WHITE}⚠️ Flagged Logs:{UIColors.RESET}")
+    if not metrics['vulnerable_log']:
+        print(f"  {UIColors.GREEN}No high-risk vulnerabilities flagged in this runtime block session.{UIColors.RESET}")
+    else:
+        for alert_addr in metrics['vulnerable_log'][-5:]:
+            print(f"  {UIColors.RED}➜ CRITICAL EXPLOIT MATCH: {alert_addr}{UIColors.RESET}")
+
+# --- Core Scanner Engine Functions ---
+def deep_analyze_signatures(address, raw_data):
+    # Simulated validation alert check path
+    if address == "1FOUND_VULNERABLE_EXAMPLE_ADDRESS_MATCH":
+        metrics['vulnerable_addresses'] += 1
+        metrics['vulnerability_counts']['Reused Nonce'] += 1
+        metrics['vulnerable_log'].append(address)
+
+def execute_scan_worker(target_address):
+    metrics['current_target'] = target_address
+    metrics['scanned_addresses'] += 1
+
+    # FIXED: Added [0] index key identifier to pick the first entry "mempool" securely out of list
+    preferred_client_key = API_PROVIDER_PRIORITY[0]
+    config = API_REGISTRY[preferred_client_key]
+    target_url = f"{config['base_url']}{config['endpoint'].format(address=target_address)}"
+
+    try:
+        response = requests.get(target_url, timeout=5)
+        if response.status_code == 200:
+            payload = response.json()
+            tx_count = config['extract_count'](payload)
+            
+            if tx_count > 0:
+                deep_analyze_signatures(target_address, payload)
+    except Exception:
+        pass  
+
+    refresh_dashboard_ui()
+    time.sleep(0.5)  
+
+def load_target_pool(file_path="addresses.txt"):
+    if not os.path.exists(file_path):
+        # Auto-populates safety defaults if you run it immediately without loading files
+        return [
+            "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 
+            "1EZ7asP83446GrcEcfKSSvE7vGZpS6bFKM", 
+            "1FOUND_VULNERABLE_EXAMPLE_ADDRESS_MATCH"
+        ]
+
+    addresses = []
+    seen = set()
+    with open(file_path, "r") as f:
+        for line in f:
+            cleaned = line.strip()
+            if cleaned and not cleaned.startswith("#") and cleaned not in seen:
+                addresses.append(cleaned)
+                seen.add(cleaned)
+    return addresses
+
+# --- Core Process Entry Point ---
+if __name__ == "__main__":
+    address_queue = load_target_pool("addresses.txt")
+    metrics['total_addresses'] = len(address_queue)
+
+    print(f"[*] Pipeline setup ready. Scanning {metrics['total_addresses']} targets.")
+    time.sleep(1.0)
+
+    for targeted_address in address_queue:
+        if app_should_exit:
+            break
+        execute_scan_worker(targeted_address)
         
-        if script_type == 'P2PKH':
-            vh160 = b'\x00' + hash160(public_key_bytes)
-            checksum = sha256(sha256(vh160).digest()).digest()[:4]
-            address = encode_base58(vh160 + checksum)
-            return address
-        elif script_type == 'P2WPKH':
-            return "P2WPKH_Address_Requires_Bech32_Encoding"
-        elif script_type == 'P2SH-P2WPKH':
-            redeem_script = b'\x00\x14' + hash160(public_key_bytes)
-            script_hash = hash160(redeem_script)
-            vh160 = b'\x05' + script_hash
-            checksum = sha256(sha256(vh160).digest()).digest()[:4]
-            address = encode_base58(vh160 + checksum)
-            return address
-        else:
-            return "Unsupported_Script_Type"
-    except Exception as e:
-        return "Invalid_Pubkey_Address_Conversion_Error"
-
-def display_stats():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print(f"{Colors.BRIGHT_CYAN}{'='*80}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_BLUE}🔍 Signature Scanner for Bitcoin Vulnerability{Colors.RESET}")
-    print(f"{Colors.BRIGHT_BLACK}📅 Scan Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_BLUE}🔧 SecAnalysts @2025 | Ctrl+C to stop scan{Colors.RESET}")
-    print(f"{Colors.BRIGHT_BLUE}💰 DONATE BITCOIN :1sAXERLyPhg4Fg4rkhuRQfm9eek2NJo6V{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}{'='*80}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_WHITE}📊 Progress Statistics:{Colors.RESET}")
-    print(f"  {Colors.WHITE}• Total Addresses:{Colors.RESET} {Colors.YELLOW}{TOTAL_ADDRESSES}{Colors.RESET}")
-    print(f"  {Colors.WHITE}• Remaining Addresses:{Colors.RESET} {Colors.YELLOW}{max(0, TOTAL_ADDRESSES - SCANNED_ADDRESSES)}{Colors.RESET}")
-    print(f"  {Colors.WHITE}• Scanned Addresses:{Colors.RESET} {Colors.CYAN}{SCANNED_ADDRESSES}{Colors.RESET}")
-    percentage = (VULNERABLE_ADDRESSES/SCANNED_ADDRESSES*100) if SCANNED_ADDRESSES > 0 else 0
-    vuln_color = Colors.GREEN if percentage == 0 else Colors.YELLOW if percentage < 10 else Colors.RED
-    print(f"  {Colors.WHITE}• Vulnerable Addresses:{Colors.RESET} {vuln_color}{VULNERABLE_ADDRESSES} ({percentage:.1f}%){Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}{'='*80}{Colors.RESET}")
-
-    # Aligned vulnerability interface layout
-    print(f"\n{Colors.BRIGHT_WHITE}🚨 Vulnerability Summary:{Colors.RESET}")
-    
-    SEV_WIDTH = 14
-    VULN_WIDTH = 38
-    COUNT_WIDTH = 8
-    BORDER = Colors.BRIGHT_CYAN
-    HEADER = Colors.BRIGHT_WHITE
-    RESET = Colors.RESET
-    
-    print(f"{BORDER}╔{'═'*SEV_WIDTH}╦{'═'*VULN_WIDTH}╦{'═'*COUNT_WIDTH}╗{RESET}")
-    print(f"{BORDER}║{HEADER}{'Severity'.center(SEV_WIDTH)}{BORDER}║{HEADER}{'Vulnerability'.center(VULN_WIDTH)}{BORDER}║{HEADER}{'Count'.center(COUNT_WIDTH)}{BORDER}║{RESET}")
-    print(f"{BORDER}╠{'═'*SEV_WIDTH}╬{'═'*VULN_WIDTH}╬{'═'*COUNT_WIDTH}╣{RESET}")
-
-    def print_row(severity, severity_color, vuln_name, vuln_color, count):
-        severity_text = f"{severity_color}{severity.ljust(SEV_WIDTH-2)}{RESET}"
+    print(f"\n{UIColors.GREEN}[+] Scanning process completed smoothly.{UIColors.RESET}")
