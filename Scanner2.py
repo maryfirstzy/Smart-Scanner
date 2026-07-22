@@ -65,7 +65,7 @@ API_ORDER_RAW_HEX_FALLBACK = [
 
 API_CONFIGS = {
     "mempool": {
-        "base_url": "https://mempool.space/api",
+        "base_url": "https://mempool.space",
         "total_tx_endpoint": "/address/{address}",
         "tx_list_endpoint": "/address/{address}/txs",
         "raw_tx_endpoint_hex": "/tx/{txid}/hex",
@@ -76,7 +76,7 @@ API_CONFIGS = {
         }
     },
     "blockstream": {
-        "base_url": "https://blockstream.info/api",
+        "base_url": "https://blockstream.info",
         "total_tx_endpoint": "/address/{address}",
         "tx_list_endpoint": "/address/{address}/txs",
         "raw_tx_endpoint_hex": "/tx/{txid}/hex",
@@ -89,7 +89,7 @@ API_CONFIGS = {
         }
     },
     "sochain": {
-        "base_url": "https://sochain.com/api/v2",
+        "base_url": "https://sochain.com",
         "total_tx_endpoint": "/address/BTC/{address}",
         "tx_list_endpoint": "/address/BTC/{address}",
         "raw_tx_endpoint_json": "/get_tx/BTC/{txid}",
@@ -100,7 +100,7 @@ API_CONFIGS = {
         }
     },
     "btc_com": {
-        "base_url": "https://chain.api.btc.com/v3",
+        "base_url": "https://btc.com",
         "total_tx_endpoint": "/address/{address}",
         "tx_list_endpoint": "/address/{address}/tx?offset={offset}&limit={limit}",
         "raw_tx_endpoint_json": "/tx/{txid}",
@@ -191,15 +191,12 @@ def int_to_hex(i):
     return hex(i)
 
 def hash160(public_key_bytes):
-    # Fixed: Uses standard hashlib engine directly to avoid RIPEMD160 missing class crashes
     try:
         h = hashlib.new('ripemd160')
         h.update(sha256(public_key_bytes).digest())
         return h.digest()
     except ValueError:
-        # Fallback for systems lacking ripemd160 in openSSL configurations
-        import hashlib as hl
-        return hl.new('ripemd160', sha256(public_key_bytes).digest()).digest()
+        return hashlib.new('ripemd160', sha256(public_key_bytes).digest()).digest()
 
 def encode_base58(v):
     base58_string = b""
@@ -255,17 +252,16 @@ def display_stats():
     print(f"{Colors.BRIGHT_CYAN}{'='*80}{Colors.RESET}")
     print(f"{Colors.BRIGHT_WHITE}📊 Progress Statistics:{Colors.RESET}")
     print(f"  {Colors.WHITE}• Total Addresses:{Colors.RESET} {Colors.YELLOW}{TOTAL_ADDRESSES}{Colors.RESET}")
-    print(f"  {Colors.WHITE}• Remaining Addresses:{Colors.RESET} {Colors.YELLOW}{TOTAL_ADDRESSES - SCANNED_ADDRESSES}{Colors.RESET}")
+    print(f"  {Colors.WHITE}• Remaining Addresses:{Colors.RESET} {Colors.YELLOW}{max(0, TOTAL_ADDRESSES - SCANNED_ADDRESSES)}{Colors.RESET}")
     print(f"  {Colors.WHITE}• Scanned Addresses:{Colors.RESET} {Colors.CYAN}{SCANNED_ADDRESSES}{Colors.RESET}")
     percentage = (VULNERABLE_ADDRESSES/SCANNED_ADDRESSES*100) if SCANNED_ADDRESSES > 0 else 0
     vuln_color = Colors.GREEN if percentage == 0 else Colors.YELLOW if percentage < 10 else Colors.RED
     print(f"  {Colors.WHITE}• Vulnerable Addresses:{Colors.RESET} {vuln_color}{VULNERABLE_ADDRESSES} ({percentage:.1f}%){Colors.RESET}")
     print(f"{Colors.BRIGHT_CYAN}{'='*80}{Colors.RESET}")
 
-    # Perfectly aligned vulnerability table
+    # Aligned vulnerability interface layout
     print(f"\n{Colors.BRIGHT_WHITE}🚨 Vulnerability Summary:{Colors.RESET}")
     
-    # Define column widths and styles
     SEV_WIDTH = 14
     VULN_WIDTH = 38
     COUNT_WIDTH = 8
@@ -273,12 +269,13 @@ def display_stats():
     HEADER = Colors.BRIGHT_WHITE
     RESET = Colors.RESET
     
-    # Table header
     print(f"{BORDER}╔{'═'*SEV_WIDTH}╦{'═'*VULN_WIDTH}╦{'═'*COUNT_WIDTH}╗{RESET}")
     print(f"{BORDER}║{HEADER}{'Severity'.center(SEV_WIDTH)}{BORDER}║{HEADER}{'Vulnerability'.center(VULN_WIDTH)}{BORDER}║{HEADER}{'Count'.center(COUNT_WIDTH)}{BORDER}║{RESET}")
     print(f"{BORDER}╠{'═'*SEV_WIDTH}╬{'═'*VULN_WIDTH}╬{'═'*COUNT_WIDTH}╣{RESET}")
 
-    # Helper function to print table rows
     def print_row(severity, severity_color, vuln_name, vuln_color, count):
-
+        severity_text = f"{severity_color}{severity.ljust(SEV_WIDTH-2)}{RESET}"
+        vuln_text = f"{vuln_color}{vuln_name.ljust(VULN_WIDTH-2)}{RESET}"
+        count_text = f"{vuln_color}{str(count).rjust(COUNT_WIDTH-2)}{RESET}"
+        print(f"{BORDER}║ {severity_text}{BORDER} ║ {vuln_text}{BORDER} ║ {count_text}{BORDER} ║{RESET}")
 
