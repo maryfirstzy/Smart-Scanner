@@ -32,7 +32,7 @@ class UIColors:
     BRIGHT_WHITE = '\033[97m'
 
 # --- API Layer Configuration ---
-API_PROVIDER_PRIORITY = ["mempool"]
+API_PROVIDER_PRIORITY = "mempool"
 
 API_REGISTRY = {
     "mempool": {
@@ -216,8 +216,7 @@ def execute_scan_worker(target_address):
     metrics['current_target'] = target_address
     metrics['scanned_addresses'] += 1
 
-    preferred_client_key = API_PROVIDER_PRIORITY[0]
-    config = API_REGISTRY[preferred_client_key]
+    config = API_REGISTRY[API_PROVIDER_PRIORITY]
     target_url = f"{config['base_url']}{config['tx_endpoint'].format(address=target_address)}"
 
     try:
@@ -232,14 +231,12 @@ def execute_scan_worker(target_address):
 
 # --- Script Entry Point Initialization ---
 if __name__ == "__main__":
-    # 1. Clean output log space safely
     try:
         with open("vuln.txt", "w", encoding="utf-8") as clear_target:
             clear_target.write(f"# --- Vulnerability Scan Results Initialized: {datetime.now()} ---\n")
     except IOError:
         print(f"{UIColors.RED}[!] Workspace warning: Unable to create or clear 'vuln.txt'.{UIColors.RESET}")
 
-    # 2. Dynamically load target database from file stream
     target_pool = []
     source_filename = "addresses.txt"
     
@@ -247,3 +244,5 @@ if __name__ == "__main__":
         try:
             with open(source_filename, "r", encoding="utf-8") as entry_file:
                 for line in entry_file:
+                    clean_addr = line.strip().replace(",", "")
+                    if clean_addr and not clean_addr.startswith("#"):
