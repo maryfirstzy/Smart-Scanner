@@ -2,6 +2,7 @@ import requests
 import time 
 from ecdsa.numbertheory import inverse_mod 
 from hashlib import sha256 
+import hashlib  # Used natively for ripemd160 fallback
 import os 
 from collections import defaultdict 
 from datetime import datetime 
@@ -13,7 +14,6 @@ from ecdsa import SECP256k1, SigningKey, VerifyingKey
 import binascii 
 import struct 
 import io 
-from Crypto.Hash import RIPEMD160  # Required for hash160()
 
 class Colors: 
     RESET = '\033[0m' 
@@ -48,7 +48,7 @@ class Colors:
     UNDERLINE = '\033[4m' 
     INVERT = '\033[7m' 
 
-# --- API Configuration (blockchain.info completely removed) --- 
+# --- API Configuration --- 
 API_ORDER_TOTAL_TX = [ 
     "mempool", 
     "blockstream", 
@@ -138,7 +138,7 @@ S_MAX_HALF = N // 2
 
 _BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" 
 
-# Bitcoin Script Opcodes (Relevant for parsing) 
+# Bitcoin Script Opcodes 
 OP_DUP = 0x76 
 OP_HASH160 = 0xA9 
 OP_EQUALVERIFY = 0x88 
@@ -163,16 +163,12 @@ OP_14 = 0x5e
 OP_15 = 0x5f 
 OP_16 = 0x60 
 
-# Map OP_N to integer N 
 OP_N_MAPPING = { 
     OP_0: 0, OP_1: 1, OP_2: 2, OP_3: 3, OP_4: 4, OP_5: 5, OP_6: 6, OP_7: 7, OP_8: 8, 
     OP_9: 9, OP_10: 10, OP_11: 11, OP_12: 12, OP_13: 13, OP_14: 14, OP_15: 15, OP_16: 16 
 } 
 
-# Nonce Bias Threshold 
 NONCE_BIAS_THRESHOLD = 2 
-
-# Cache for fetched raw transaction hexes 
 TX_RAW_HEX_CACHE = {} 
 
 # --- Utility Functions --- 
@@ -192,9 +188,10 @@ def int_to_hex(i):
     return hex(i) 
 
 def hash160(public_key_bytes): 
-    ripemd160 = RIPEMD160.new() 
-    ripemd160.update(sha256(public_key_bytes).digest()) 
-    return ripemd160.digest() 
+    # Use native hashlib with a standard ripemd160 definition engine
+    h = hashlib.new('ripemd160')
+    h.update(sha256(public_key_bytes).digest()) 
+    return h.digest() 
 
 def encode_base58(v): 
     base58_string = b"" 
@@ -222,11 +219,7 @@ def public_key_to_address(public_key_hex, is_compressed=True, script_type='P2PKH
         public_key_bytes = binascii.unhexlify(public_key_hex) 
          
         if script_type == 'P2PKH': 
-            if is_compressed: 
-                vh160 = b'\x00' + hash160(public_key_bytes) 
-            else: 
-                vh160 = b'\x00' + hash160(public_key_bytes) 
-             
+            vh160 = b'\x00' + hash160(public_key_bytes) 
             checksum = sha256(sha256(vh160).digest()).digest()[:4] 
             address = encode_base58(vh160 + checksum) 
             return address 
@@ -261,10 +254,8 @@ def display_stats():
     print(f"  {Colors.WHITE}• Vulnerable Addresses:{Colors.RESET} {vuln_color}{VULNERABLE_ADDRESSES} ({percentage:.1f}%){Colors.RESET}") 
     print(f"{Colors.BRIGHT_CYAN}{'='*80}{Colors.RESET}") 
 
-    # Perfectly aligned vulnerability table 
     print(f"\n{Colors.BRIGHT_WHITE}🚨 Vulnerability Summary:{Colors.RESET}") 
      
-    # Define column widths and styles 
     SEV_WIDTH = 14 
     VULN_WIDTH = 38 
     COUNT_WIDTH = 8 
@@ -272,9 +263,11 @@ def display_stats():
     HEADER = Colors.BRIGHT_WHITE 
     RESET = Colors.RESET 
      
-    # Table header 
     print(f"{BORDER}╔{'═'*SEV_WIDTH}╦{'═'*VULN_WIDTH}╦{'═'*COUNT_WIDTH}╗{RESET}") 
     print(f"{BORDER}║{HEADER}{'Severity'.center(SEV_WIDTH)}{BORDER}║{HEADER}{'Vulnerability'.center(VULN_WIDTH)}{BORDER}║{HEADER}{'Count'.center(COUNT_WIDTH)}{BORDER}║{RESET}") 
     print(f"{BORDER}╠{'═'*SEV_WIDTH}╬{'═'*VULN_WIDTH}╬{'═'*COUNT_WIDTH}╣{RESET}") 
 
-    # Helper function to print table rows 
+    def print_row(severity, severity_color, vuln_name, vuln_color, count): 
+        severity_text = f"{severity_color}{severity.ljust(SEV_WIDTH-2)}{RESET}" 
+        vuln_text = f"{vuln_color}{vuln_name.ljust(VULN_WIDTH-2)}{RESET}" 
+        count_text = f"{vuln_color}{str(count).rjust(COUNT_WIDTH-2)}{RESET}" 
